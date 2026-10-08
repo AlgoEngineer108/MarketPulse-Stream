@@ -1,13 +1,13 @@
-# RealTime StockStream
+# MarketPulse Stream
 
-RealTime StockStream is a streamlined system for processing live stock market data. It uses Apache Kafka for data input, Apache Spark for data handling, and Apache Cassandra for data storage, making it a powerful yet easy-to-use tool for financial data analysis 💹🕊️
+MarketPulse Stream is a streamlined system for processing live stock market data. It uses Apache Kafka for data input, Apache Spark for data handling, and Apache Cassandra for data storage, making it a powerful yet easy-to-use tool for financial data analysis 💹🕊️
 
 
 ![real-time-stock-stream](./assets/background.jpg)
 
 ## Getting Started
 
-This guide will walk you through setting up and running the RealTime StockStream on your local machine for development and testing.
+This guide will walk you through setting up and running MarketPulse Stream on your local machine for development and testing.
 
 ### Prerequisites
 
@@ -39,14 +39,9 @@ Ensure you have the following software installed:
 
 ### Installation
 
-Follow these steps to set up your development environment:
-
-#### Setting Up Kafka
-
-1. **Create a Kafka Topic**:
-   ```bash
-   kafka-topics.sh --create --topic stocks --bootstrap-server localhost:9092 --partitions 1 --replication-factor 1
-   ```
+Everything — the Kafka topic, the Cassandra keyspace/tables, and the Spark
+streaming job — is bootstrapped automatically by Docker Compose on startup.
+There are no manual setup steps; see **Docker Compose** below.
 
 
 ## Suppored Data Opreations
@@ -64,22 +59,10 @@ Follow these steps to set up your development environment:
 
 #### Configuring Cassandra
 
-1. **Create a Keyspace and Table**:
-   Execute the following CQL commands to set up your Cassandra database:
-   ```sql
-   CREATE KEYSPACE stockdata WITH replication = {'class':'SimpleStrategy', 'replication_factor' : 1};
-
-   CREATE TABLE stockdata.stocks (
-       stock text,
-       trade_id uuid,
-       price decimal,
-       quantity int,
-       trade_type text,
-       trade_date date,
-       trade_time time,
-       PRIMARY KEY (stock, trade_id)
-   );
-   ```
+The schema (keyspace + all 6 tables, including TTLs on the tables that grow
+per-trade) lives in [`init-cassandra/init.cql`](./init-cassandra/init.cql) and
+is applied automatically by the `cassandra` container's entrypoint on every
+start — it's idempotent (`IF NOT EXISTS`), so restarts are safe.
 
 ## System Architecture
 
@@ -88,136 +71,41 @@ Follow these steps to set up your development environment:
 
 #### Docker Compose
 
-1. **Launch Services**:
-   Use Docker Compose to start Kafka, Zookeeper, Cassandra, and Spark services:
-   ```yaml
-    version: '3.9'
+The full stack — Zookeeper, Kafka, Cassandra, Spark, the trade producer, and
+the dashboard — is defined in [`docker-compose.yaml`](./docker-compose.yaml).
+Each service's `entrypoint` handles its own readiness/init (creating the Kafka
+topic, applying the Cassandra schema, waiting for dependencies before
+submitting the Spark job), and `healthcheck`s gate startup order so dependent
+services never start against a not-yet-ready broker/cluster.
 
-    name: "realtime-stock-market"
+**Launch everything:**
+```bash
+docker compose up -d
+```
 
-    services:
-    zookeeper:
-        image: bitnami/zookeeper:latest
-        ports:
-        - "2181:2181"
-        environment:
-        - ALLOW_ANONYMOUS_LOGIN=yes
-        networks:
-        stock-net:
-            ipv4_address: 172.28.1.1
-            
-    kafka:
-        image: bitnami/kafka:latest
-        ports:
-        - "9092:9092"
-        environment:
-        - KAFKA_BROKER_ID=1
-        - KAFKA_CFG_LISTENERS=PLAINTEXT://:9092
-        - KAFKA_CFG_ADVERTISED_LISTENERS=PLAINTEXT://172.28.1.2:9092
-        - KAFKA_CFG_ZOOKEEPER_CONNECT=zookeeper:2181
-        - ALLOW_PLAINTEXT_LISTENER=yes
-        depends_on:
-        - zookeeper
-        networks:
-        stock-net:
-            ipv4_address: 172.28.1.2
-        volumes:
-        - ./scripts/init-kafka.sh:/init-kafka.sh
-        # entrypoint: ["/bin/bash", "init-kafka.sh"]
-        restart: always
+That single command starts the whole pipeline end to end — no manual
+`kafka-topics.sh`, `cqlsh`, or `spark-submit` steps required. Services
+restart automatically (`restart: always`) if a container crashes, and the
+Spark job itself retries on failure without needing a container restart.
 
-    cassandra:
-        image: cassandra:latest
-        ports:
-        - "9042:9042"
-        volumes:
-        - ./init-cassandra:/init-cassandra
-        - ./scripts/init-cassandra-schema.sh:/init-cassandra-schema.sh
-        environment:
-        - CASSANDRA_START_RPC=true
-        networks:
-        stock-net:
-            ipv4_address: 172.28.1.3
-        # entrypoint: ["/bin/bash", "init-cassandra-schema.sh"]
-        restart: always
-
-    spark:
-        image: bitnami/spark:latest
-        volumes:
-        - ./spark:/opt/bitnami/spark/jobs
-        - ./scripts/submit-spark-job.sh:/opt/bitnami/spark/submit-spark-job.sh
-        ports:
-        - "8080:8080"
-        depends_on:
-        - kafka
-        networks:
-        stock-net:
-            ipv4_address: 172.28.1.4
-        # entrypoint: ["sh", "-c", "./submit-spark-job.sh"]
-        restart: always
-
-    kafka_producer:
-        build:
-        context: ./kafka-producer
-        dockerfile: kafka_producer.dockerfile
-        depends_on:
-        - kafka
-        networks:
-        stock-net:
-            ipv4_address: 172.28.1.8
-        restart: always
-
-    plotly:
-        build:
-        context: ./plotly
-        dockerfile: plotly.dockerfile
-        volumes:
-        - ./plotly/dashboard.py:/dashboard.py
-        ports:
-        - "8050:8050"
-        depends_on:
-        - cassandra
-        networks:
-            stock-net:
-            ipv4_address: 172.28.1.9
-        restart: always
-
-    networks:
-    stock-net:
-        driver: bridge
-        ipam:
-        config:
-            - subnet: 172.28.0.0/16
-   ```
-
-2. **Run Docker Compose**:
-   ```bash
-   docker-compose up -d
-   ```
-
-### Usage
-
-1. **Run the Spark Job**:
-   Use the `spark-submit` command to run your Spark job. 
-   ```bash
-   $ spark-submit --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.3.1,com.datastax.spark:spark-cassandra-connector_2.12:3.0.0 spark_job.py stocks
-   ```
-
-2. **Produce and Consume Data**:
-   Start producing data to the `stocks` topic and monitor the pipeline's output.
+**Check status / logs:**
+```bash
+docker compose ps
+docker compose logs -f spark       # watch the streaming job
+docker compose logs -f dashboard   # watch the web app
+```
 
 ## Monitoring and Logging
 
-Check the logs for each service in their respective directories for monitoring and debugging.
+Check the logs for each service with `docker compose logs -f <service>` for
+monitoring and debugging.
 
 
 ## Visualizations
 
-To run the dashbaord, you need to run the following command:
-
-```bash
-$ cd plotly & python3 dashboard.py
-```
+The dashboard (in [`dashboard/`](./dashboard)) is a multi-page Dash web app
+that's started automatically by Docker Compose — no manual run step needed.
+Once the stack is up, open it at **http://localhost:8050**.
 
 ![graph 1](./assets/graph1.png)
 
@@ -276,7 +164,7 @@ $ cd plotly & python3 dashboard.py
 
 ## Contributing
 
-Contributions to RealTime StockStream are welcome, just open a PR 😊.
+Contributions to MarketPulse Stream are welcome, just open a PR 😊.
 
 ## Authors
 

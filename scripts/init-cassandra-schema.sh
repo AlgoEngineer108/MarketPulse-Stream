@@ -1,20 +1,19 @@
 #!/bin/bash
 set -e
 
-# Function to check if Cassandra is up and running
-function check_cassandra {
-    while ! cqlsh -e "describe keyspaces" &>/dev/null; do
-        echo "Waiting for Cassandra to be up..."
-        sleep 10
-    done
-}
+# Start the real Cassandra server in the background (this replaces the
+# image's default entrypoint, so we have to launch it ourselves).
+docker-entrypoint.sh cassandra -f &
+CASSANDRA_PID=$!
 
-echo "Setting up Cassandra schema..."
+echo "Waiting for Cassandra to accept connections..."
+until cqlsh -e "describe keyspaces" >/dev/null 2>&1; do
+    sleep 3
+done
 
-# Wait for Cassandra to be ready
-check_cassandra
+echo "Applying schema (idempotent: safe to re-run on every container start)..."
+cqlsh -f /init-cassandra/init.cql
+echo "Cassandra schema ready."
 
-# Execute schema setup commands
-cqlsh -f /init-cassandra/init.cql -u cassandra -p cassandra
-
-echo "Cassandra schema setup complete."
+# Keep the server in the foreground so docker can track/restart it correctly.
+wait "$CASSANDRA_PID"
